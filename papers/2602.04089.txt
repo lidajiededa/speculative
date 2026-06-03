@@ -1,0 +1,854 @@
+
+
+--- PAGE 1 ---
+Scaling In-Context Online Learning Capability of
+LLMs via Cross-Episode Meta-RL
+Xiaofeng Lin1∗ Sirou Zhu2∗ Yilei Chen1 Mingyu Chen1 Hejian Sang2
+Ioannis Paschalidis1 Zhipeng Wang2 Aldo Pacchiano1
+Xuezhou Zhang1†
+1Boston University, Boston, MA 2LinkedIn, Sunnyvale, CA
+Abstract
+Large language models (LLMs) achieve strong performance when all task-relevant
+information is available upfront, as in static prediction and instruction-following
+problems. However, many real-world decision-making tasks are inherently online:
+crucial information must be acquired through interaction, feedback is delayed,
+and effective behavior requires balancing information collection and exploita-
+tion over time. While in-context learning enables adaptation without weight
+updates, existing LLMs often struggle to reliably leverage in-context interaction
+experience in such settings. In this work, we show that this limitation can be
+addressed through training. We introduce ORBIT, a multi-task, multi-episode
+meta–reinforcement learning framework that trains LLMs to learn from interaction
+in context. After meta-training, a relatively small open-source model (Qwen3-14B)
+demonstrates substantially improved in-context online learning on entirely unseen
+environments, matching the performance of GPT-5.2 and outperforms standard
+RL fine-tuning by a large margin. Scaling experiments further reveal consistent
+gains with model size, suggesting significant headroom for learn-at-inference-time
+decision-making agents. Code reproducing the results in the paper can be found at:
+https://github.com/XiaofengLin7/ORBIT.
+1 Introduction
+Humans are remarkable learners. While we are far from omniscient, we can often acquire new skills
+rapidly: a few rounds of trial and error, combined with memory and reasoning, frequently suffice
+to discover effective strategies in a new game, interface, or problem domain. The capability to use
+interaction experience to improve behavior over time constitutes a fundamental aspect of intelligence.
+In contrast, online learning remains a fundamental challenge for large language models (LLMs).
+Despite their impressive in-distribution performance, today’s LLMs typically require substantial
+post-training to reliably adapt to new domains and skills. For example, strong coding performance
+usually demands explicit training on code, and similarly, domain expertise often follows targeted
+fine-tuning on domain data. More broadly, once a model is deployed, it rarely improves on a task
+through continued interaction in the way humans do. This “static-after-shipping” property is a major
+obstacle for building general-purpose agents that must operate in new environments, recover from
+mistakes, and refine strategies as they accumulate experience.
+∗Equal contribution.
+†Corresponding author: xuezhouz@bu.edu
+Preprint. Under review.
+arXiv:2602.04089v1  [cs.AI]  3 Feb 2026
+
+--- PAGE 2 ---
+Figure 1: Left: ORBITgains over the base model on episode -3 success rate for Maze and Mastermind
+(w/ ORBITvs. w/o ORBIT). Right: Average success rate across Maze and Mastermind over
+episodes for ORBIT, GPT -4o, GPT-5.2 (high reasoning effort), and the oracle algorithms for the test
+environment (details in Appendix C) Both tasks are unseen during training.
+While true continual learning through weight updates remains an open problem, a promising alterna-
+tive isin-context learning(ICL), where a model adapts to new information using only its context
+window. First highlighted in GPT-3 [2], ICL shows that pretrained LLMs can condition on demon-
+strations and feedback without parameter updates. However, the settings that matter for autonomy
+are not static input–output prediction: they require learning a decision strategy from sequential
+experience. In partially observed, interactive tasks, an agent must explore to acquire information,
+perform credit assignment, and then exploit what it has learned, all while thetraining signalarrives
+as delayed feedback from the environment. Empirically, even frontier models struggle to reliably
+exploit in-context experience to perform effective online decision making in such settings (Fig. 1),
+suggesting that strong language modeling alone does not yield robustin-context online learning.
+To make this concrete, we focus on a particular online learning regime that arises naturally in practice.
+An agent is deployed to solve an unfamiliar task, such as navigating a new interface, operating in an
+unknown environment, or interacting with a system whose rules are not fully specified upfront. On its
+first attempt, the agent may act sensibly yet fail due to hidden constraints or incomplete understanding.
+Importantly, the task itself does not change: the agent is typically given multiple chances to try again,
+each starting from a fresh initial state but governed by the same underlying dynamics. A competent
+learner should therefore treat early attempts as opportunities to gather information and use what it
+has observed to improve behavior in later ones. We refer to this regime asmulti-episode in-context
+online learning, where adaptation must occur across repeated trials of the same task using only the
+interaction history stored in the context window, without updating model parameters.
+This paper asks a simple question:
+Can we endow LLMs with general-purpose in-context online learning capability?
+We answer this in the affirmative by presenting ORBIT, a simple yet effectivemulti-task, multi-episode
+meta–reinforcement learningframework that enables LLMs to perform in-context online learning
+in unseen tasks. The key idea is to meta-train a pretrained LLM across a diverse distribution of
+decision-making environments and across multiple episodes per task to maximize long-term reward,
+for which active information collection becomes a must. In this training setup, the model is not
+rewarded merely for solving a single instance; it is rewarded forlearning to learn within context.
+Early interaction must be used to gather task-relevant information and reduce uncertainty, while later
+interaction must exploit this information to achieve higher returns. Importantly, we intentionally keep
+the framework as simple as possible, avoiding additional components such as external memory [13]
+or extensive prompt engineering for summarization and reflection [20] that have been explored in
+prior work, in order to isolate and highlight the sole effect ofmulti-episode meta-RL.
+Our results provide strong evidence that such capability can emerge. After meta-training on a suite
+of partially observable decision-making tasks, a relatively small open-source model (Qwen3-14B)
+2
+
+--- PAGE 3 ---
+Figure 2: Example of Multi-Episode Meta-RL for Enterprise Tool-Use. (Top) Standard RL typically
+treats episodes as isolated events with state resets (tabula rasa), preventing the transfer of learned
+environmental constraints (e.g., API schemas, rate limits) between trials. (Bottom) A Meta-RL
+framework enables in-context adaptation across episodes. The agent accumulates a persistent
+interaction history, allowing it to transition from probing unknown tools (Ep 1) to refining its
+strategy based on errors (Ep 2), and finally exploiting the learned mental model (Ep 3) for reliable
+execution, all without requiring weight updates.
+exhibits substantially improved in-context online learning ability oncompletely unseenenvironments,
+matching GPT-5.2 and outperforms traditional RL fine-tuning baselines (Fig. 1 and Fig. 3). We
+further conduct scaling experiments and observe consistent gains as model size increases, suggesting
+meaningful headroom for future progress. Overall, our findings highlight meta reinforcement learning
+as a promising pathway toward general-purpose, online decision-making agents that can learn
+effectively at inference time.
+1.1 Related Work
+The In-context Learning PhenomenonIn-context learning (ICL) was popularized by the GPT-3
+technical report [2], which demonstrated that large language models can follow task instructions
+from a small number of prompt demonstrations without parameter updates. Most subsequent
+studies and practical deployments of ICL focus on few-shotinstruction followingunder static input–
+output formats, often further reinforced by instruction tuning and preference-based post-training
+methods [4, 12, 16]. Mechanistic analyses suggest that ICL may correspond to implicit optimization
+implemented by the model’s forward pass [1, 26]. However, these settings typically do not require
+agents to actively explore or adapt through ongoing interaction, which is the central challenge in
+continual learning.
+In-context Reinforcement LearningParallel to developments in language modeling, the rein-
+forcement learning community has long pursued general-purpose RL algorithms. With the advent
+of transformers [25], numerous works have attempted to train transformers as sequential decision-
+making agents, most notably Decision Transformer [3]. A growing body of work studies in-context
+reinforcement learning (ICRL) on classical RL benchmarks such as Atari, aiming to train sequence
+models that adapt online from interaction histories [7, 8, 9, 18]. However, many of these approaches
+train models from scratch or from narrow trajectory distributions, which limits their ability to gener-
+3
+
+--- PAGE 4 ---
+alize to unseen tasks. In contrast, starting from a pretrained language model offers a strong semantic
+and reasoning prior, motivating our focus on general-purpose in-context RL built on top of pretrained
+LLMs.
+In-context Online and Reinforcement Learning in Language ModelsRecent studies have
+directly evaluated frontier LLMs as in-context online learners on canonical problems such as multi-
+armed bandits, often finding brittle or inconsistent exploration behavior in the absence of targeted
+training [5, 6, 10, 11, 15, 17, 21, 29]. Motivated by these limitations, several recent works aim to
+improve the in-context RL capabilities of LLMs via post-training on self-generated interaction data.
+Iterative RMFT Park et al. [14] uses regret-based trajectory selection followed by iterative supervised
+fine-tuning, but is primarily evaluated in canonical multi-armed bandit settings. PAPRIKA [ 22]
+constructs preference signals from sampled trajectories for multi-turn post-training and similarly
+evaluates generalization to new tasks, but reports relatively weak performance on several environments
+(e.g., 2% success rates on Mastermind). Closest to our approach is the concurrent meta-RL framework
+of Yan et al. [27], whose objective can be viewed as a discounted variant of ours; however, their
+evaluation focuses on environments identical to those seen during training, making it difficult to
+isolate the effect of ICL vs memorizing the environment. To the best of our knowledge, our work
+is the first to demonstrate substantial and transferable improvements in in-context reinforcement
+learning capability across diverse, unseen tasks.
+2 In-context Reinforcement Learning
+We model each task as a finite-horizon episodic Markov decision process (MDP)
+M= (S,A, P, r, ρ, H),
+where S and A are the state and action spaces, P(· |s, a) is the transition kernel, r(s, a) is the reward
+function, ρ is the initial-state distribution, and H is the (per-episode) horizon. An episode begins with
+se,0 ∼ρand proceeds for at mostHsteps, terminating early if a terminal state is reached.
+In-context policies as online RL algorithms.We consider an LLM agent with parameters θ
+that selects actions using only the interaction transcript stored in its context window. In episode
+e∈ {1, . . . , T} and within-episode timestep t∈ {0, . . . , H−1} , the agent observes se,t and samples
+an action
+ae,t ∼π θ(· |h e,t),
+whereh e,t denotes the full history available in context up to that point. Concretely, we can write
+he,t =
+ 
+τ (1), . . . , τ(e−1), se,0, ae,0, re,0, . . . , se,t
+
+,
+i.e., the concatenation of all prior episodes and the partial trajectory of the current episode. The
+environment transitions as se,t+1 ∼P(· |s e,t, ae,t) and emits reward re,t =r(s e,t, ae,t). In this
+view, an online RL algorithm is simply a (possibly randomized) mapping from histories to action
+distributions; in-context reinforcement learning aims to realize such an algorithm through the LLM’s
+forward pass, without any parameter updates at test time.
+Multi-episode interaction protocol.To capture repeated trials of thesameunderlying task, we
+evaluate the agent on T episodes of interaction with a fixed MDP M. Each episode resets the
+environment (fresh se,0 ∼ρ ) while keeping (P, r) unchanged, and the agent retains the entire cross-
+episode transcript in its context window. We summarize the protocol in Algorithm 1. Let τ (e) denote
+the trajectory collected in episodee:
+τ (e) = (se,0, ae,0, re,0, . . . , se,ℓe),
+where ℓe ≤H allows for early termination. The full interaction trace across T episodes is the
+concatenationτ= (τ (1), . . . , τ(T) ).
+Evaluation via in-context regret across episodes.Let the return of episodeebe
+G(e) =
+ℓe−1X
+t=0
+re,t,withℓ e ≤H,
+4
+
+--- PAGE 5 ---
+Algorithm 1Multi-Episode Interaction Protocol
+Require:Task MDPM= (S,A, P, r, ρ, H), number of episodesT, policyπ θ
+Ensure:Cross-episode interaction traceτ
+Initialize empty historyh←()
+fore= 1...Tdo
+s←env.reset()(samples∼ρ)
+fort= 0...H−1do
+Sample actiona∼π θ(· |h, s)
+Executeaand observe next states ′ and rewardr=r(s, a)
+Update historyh←(h, s, a, r, s ′)
+s←s ′
+ifsis terminalthen
+break
+end if
+end for
+end for
+returnτ≡h
+and define the total return overTepisodes as PT
+e=1 G(e). Let
+J ⋆(M) = max
+π
+E
+"H−1X
+t=0
+r(st, at)
+#
+denote the optimal expected per-episode return on M (under the same initial-state distribution ρ and
+dynamicsP). We define thein-context regretafterTepisodes as
+RegT (M) =T·J ⋆(M)−E
+" TX
+e=1
+G(e)
+#
+,
+where the expectation is over the environment randomness (initial states and transitions) and the
+agent’s action sampling.
+A strong in-context online learner is one whose regret grows slowly with T , indicating that it quickly
+extracts task-relevant information from early interaction and exploits it to achieve near-optimal
+performance in later trials. Minimizing RegT (M) induces an exploration–exploitation trade-off
+across episodes: actions in early episodes may sacrifice immediate reward to reduce uncertainty
+about the task, while the resulting information—retained in the context window—can be exploited to
+improve returns in subsequent episodes, all without any parameter updates.
+3 ORBIT: Online Reinforcement-Based In-Context Training
+To train a general-purpose in-context learning agent capable of solving diverse tasks on the fly, we
+train the agent on a collection of tasks (e.g., Minesweeper and Blackjack) and evaluate it on a disjoint
+set of unseen tasks (e.g., Mastermind and Maze). These tasks differ substantially in their underlying
+dynamics, observation structures, and optimal solution strategies, such that naïvely transferring a
+fixed policy or heuristic across tasks is ineffective; success therefore requires the agent to infer
+task-specific structure and adapt its behavior through in-context interaction, effectively learning how
+to learn within each new task.
+During training, we sample a task M from the training task set M. The agent then interacts with
+M for HT steps, generating a trajectory τ according to the multi-episode interaction protocol
+(Alg. 1) and accumulating reward R(M;τ) . This training procedure can be viewed as a meta-level
+reinforcement learning problem, where the objective is to learn a non-Markovian meta-policy
+Π :h t 7→a t,
+implemented by the LLM acting purely in context. The meta-learning objective is to maximize the
+expected normalized cumulative reward—equivalently, to minimize regret—over the task distribution,
+max
+Π
+EM∼M,Π[R(M;τ)].
+5
+
+--- PAGE 6 ---
+Table 1: Summary of training and test environments. All environments are partially observable. H
+denotes the maximum number of steps per episode, and T denotes the number of episodes. All
+training tasks use 512 instances, and all test tasks use 256 instances.
+Environment Split Task DescriptionH T
+RPS Train Infer opponent action distribution and adapt actions to maximize win rate 5 3
+Minesweeper Train Infer hidden mines and reveal all safe cells under partial observability 8 3
+Hangman Train Sequentially guess letters to uncover a hidden word with limited attempts 10 3
+Wordle Train Infer a hidden word using structured feedback from each guess 10 3
+Blackjack Train Infer deck composition to maximize expected return in a stochastic card game 4 3
+Maze Test Explore an unknown map to reach a goal using local observations only 9 3
+Mastermind Test Infer a hidden ordered sequence using structured feedback 3 3
+3.1 Reward Design
+To prevent reward hacking and ensure alignment with task completion, we define rewards at the
+trajectory level based on the number of successful task completions within a trajectory. For each task
+M, let GM ⊆ S denote the set of goal (terminal success) states, and define a success indicator at time
+tas
+I(M)
+t =1{s t ∈ G M }.
+We ignore any task-specific process rewards provided by the environment and instead use a unified
+binary completion reward. This choice avoids scale-induced imbalances across tasks: if different tasks
+exhibit heterogeneous reward magnitudes, tasks with larger intrinsic reward scales would dominate
+the optimization signal and contribute disproportionately large gradients. Using a standardized 0−1
+completion reward ensures balanced gradient contributions across tasks and focuses learning on
+successful task completion rather than exploiting task-specific reward shaping.
+The trajectory-level reward is then defined as the success count
+R(M;τ) =
+T−1X
+t=0
+I(M)
+t ,
+which measures how many times the agent successfully completes the task within the interaction
+budget T . The corresponding meta-learning objective is to maximize the expected success count over
+the task distribution,
+max
+Π
+EM∼M, τ∼Π [R(M;τ)].
+This objective encourages agents to reliably complete tasks rather than exploit dense or shaped reward
+signals, and naturally supports episodic environments in which multiple task completions may occur
+within a single trajectory.
+3.2 Policy Optimization
+We optimize the meta-policy Π using Group Relative Policy Optimization (GRPO) [19], a policy-
+gradient method that operates directly on trajectory-level returns and avoids explicit value-function
+estimation. This choice is closely aligned with our reward design, which is intrinsically sparse
+and outcome-driven: reward is assigned only based on task completion within a trajectory, with no
+intermediate or process-level supervision.
+For each training task M∼ M , we sample a group of K trajectories {τ (k)}K
+k=1 by rolling out
+the current meta-policy Π in context. Each trajectory τ (k) is assigned a trajectory-level reward
+R(M;τ (k)), defined as the total number of successful task completions within the trajectory. GRPO
+computes a relative advantage for each trajectory by normalizing rewards within the group,
+ˆA(k) =R(M;τ (k))− 1
+K
+KX
+j=1
+R(M;τ (j)),
+6
+
+--- PAGE 7 ---
+which serves as a baseline for variance reduction.
+LetΠ old denote the meta-policy before the update. We define the importance sampling ratio
+r(k)
+t = Π(a(k)
+t |h (k)
+t )
+Πold(a(k)
+t |h (k)
+t )
+,
+and apply PPO-style clipped updates with asymmetric clipping bounds(ϵlow, ϵhigh) to stabilize training.
+The resulting GRPO objective is
+LGRPO(Π) =E M∼M
+"
+1
+K
+KX
+k=1
+T−1X
+t=0
+min
+
+r(k)
+t ˆA(k),clip
+
+r(k)
+t ,1−ϵ low,1 +ϵ high
+
+ˆA(k)
+#
+.
+A key property of GRPO is that it operates fundamentally at the level of complete trajectories
+and does not maintain or learn an explicit value function. Consequently, it cannot reliably exploit
+fine-grained or process-level reward signals that depend on intermediate states or partial progress
+within a trajectory. Since group sampling, reward normalization, and advantage computation are all
+performed over full trajectories, the learning signal depends only on relative differences in aggregated
+trajectory outcomes. In this sense, GRPO is inherently outcome-driven: it compares trajectories
+based on overall success rather than intermediate feedback.
+While the inability to leverage dense process rewards may be a limitation in settings where such
+signals are informative, it is well matched to our objective. Our reward design is intentionally sparse
+and aligned with task completion, both to avoid reward hacking and to ensure balanced optimization
+across heterogeneous tasks. Moreover, recent empirical evidence suggests that suppressing step-wise
+credit assignment can be beneficial for reasoning-intensive settings. For example, the Kimi K1.5
+technical report [ 24] observes that removing value-function-based credit assignment encourages
+exploration of diverse reasoning paths, allowing models to recover from intermediate errors and
+learn effective trial-and-error strategies from final outcomes alone. Although our setting differs,
+this observation provides supporting intuition that outcome-level supervision can promote richer
+in-context adaptation rather than prematurely constraining behavior based on local signals.
+4 Experiments
+4.1 Environments
+Table 1 summarizes all training and test environments along with concise task descriptions. All
+environments are partially observable in the sense that the environment parameters, such as the map
+of the maze, is initially unknown to the agent. Successful completion of the task requires the agent to
+balance exploration and exploitation. Detailed prompt designs and task specifications are provided in
+Appendix A and Appendix B.
+4.2 Experimental Setup
+For most experiments in this paper, we use Qwen3-8B as the base model [28]. In the scaling study,
+we additionally train agents on top of Qwen3-{4B, 8B, 14B} to examine how in-context learning
+performance scales with model size. All base models have a maximum context length of 32,768
+tokens. All experiments are implemented using the RLLM training framework [23].
+The relatively limited context length of 32k tokens is a primary factor constraining the interaction
+horizon in our experiments. To ensure that complete interaction histories can be preserved within
+the context window, we restrict each task instance to three episodes per game. Extending this
+framework to longer horizons is a natural direction for future work, particularly with larger-context
+or memory-augmented models.
+Training setup.During training, we use temperature 1.0 and top-p= 1.0 . Trajectories that exceed
+this limit are truncated and assigned zero reward. For each training instance, we generate4 trajectories
+7
+
+--- PAGE 8 ---
+Figure 3: ORBITinduces genuine in-context learning beyond single-episode and multitask baselines.
+Success rate versus episode index on unseen Maze (left) and Mastermind (right) tasks. We compare
+ORBIT(8B) against the base model and RL baseline.
+and use a batch size of 64 across all model sizes. Models are trained for 100 optimization steps with
+a learning rate of 1×10 −6, using PPO-style clipped policy updates with asymmetric clipping bounds
+(0.2,0.28) . Both entropy regularization and KL regularization are disabled. We enable the model’s
+thinking mode during training. Due to limited computational resources, all comparison experiments
+are conducted using Qwen3-8B; Only scaling law experiments include the 4B and 14B.
+Training setup.During training, we use temperature 1.0 and top- p= 1.0 . Each trajectory is
+generated subject to the 32k-token context limit; trajectories that exceed this limit are truncated and
+assigned zero reward. For each training instance, we sample a group of K= 4 trajectories for GRPO
+optimization. We use a batch size of64trajectories across all model sizes.
+Models are trained for 100 optimization steps with a learning rate of 1×10 −6, using PPO-style
+clipped policy updates with asymmetric clipping bounds (0.2,0.28) . Both entropy regularization and
+KL regularization are disabled. We enable the model’s thinking mode during training to match the
+inference-time configuration.
+Evaluation setup.For Sections 4.3 and 4.4, we report results from the checkpoint obtained after 100
+optimization steps. For Section 4.5, we instead report the best-performing checkpoint within the first
+100 optimization steps, in order to reflect the full performance potential of ORBIT. Model checkpoints
+are evaluated using the inference settings recommended for Qwen3 models, with temperature 0.6 and
+top-p= 0.95. Thinking mode is enabled during evaluation to match the training configuration.
+All evaluations are conducted on two test environments,MazeandMastermind, which are entirely
+unseen during training and each comprise 256 distinct instances. This evaluation protocol is designed
+to assess generalization beyond the training tasks. We intentionally do not evaluate on training tasks
+or on intra-environment variants (e.g., Minesweeper with a larger board or Wordle with longer words),
+as success rates in these settings typically saturate quickly and make it difficult to disentangle genuine
+in-context adaptation from environment memorization. Focusing on entirely unseen task classes
+therefore provides a cleaner evaluation of generalizable in-context reinforcement learning behavior.
+4.3 ORBITLearns In Context
+Figure 3 shows that ORBITinduces genuine in-context learning on the unseenMazeandMastermind
+tasks. Compared to the base model, ORBIT(8B) achieves substantially higher success rates and,
+critically, continues to improve across successive episodes. This consistent upward trend indicates
+that the model effectively leverages interaction history stored in the context window to refine its
+behavior online.
+Crucially, ORBITalso consistently outperforms the standard RL post-training baseline, which is
+trained on the same task distribution but optimized using single-episode completion rewards. While
+this RL baseline yields modest improvements over the base model in early episodes, its performance
+quickly saturates or even degrades as episodes progress, suggesting a limited capacity for in-context
+8
+
+--- PAGE 9 ---
+Table 2:Episode 3 success rate improvement over the base model.We report success rates in
+Episode 3 on Maze and Mastermind, together with absolute improvements over the base model.
+Task Method Ep 3 Success∆vs. Base
+Maze RL0.45 +0.23
+ORBIT0.55+0.33
+Mastermind RL0.21−0.06
+ORBIT0.59+0.32
+adaptation. In contrast, ORBITexhibits monotonic improvement across episodes on both tasks,
+highlighting its ability to adapt behavior based on feedback from previous interactions.
+Table 2 further reinforces this distinction by focusing on performance in the third episode, after
+the agent has accumulated interaction history within the same task instance. ORBITconsistently
+outperforms both the base model and the RL baseline, whereas the RL baseline shows limited or
+unstable gains once early episodes fail. This pattern suggests that ORBIT’s improvements are not
+merely the result of stronger static task-solving policies learned during training, but instead arise
+from its ability to adapt its behavior within a task using information from prior episodes.
+Taken together, these results demonstrate that ORBITlearns an in-context policy that supports online
+adaptation at inference time, enabling exploration and refinement across episodes without parameter
+updates. This behavior distinguishes ORBITfrom conventional RL post-training approaches that
+operate on isolated, single-episode rollouts, and underscores the effectiveness of our framework for
+inducing in-context reinforcement learning in large language models.
+4.4 ORBITLearns to Explore
+Figure 4: A trace of ORBITin Maze. The agent observes only its local surroundings and must rely on
+its history to guide decisions. The first two episodes (Ep 1 and Ep 2) fail to reach the goal, exploring
+suboptimal paths. Leveraging reflections over past interactions, the agent adapts its strategy and, in
+the third episode (Ep 3), follows a new route that successfully reaches the goal.
+Figure 4 and, in particular, the snippet in Table 3 provide qualitative evidence that ORBITacquires an
+exploration strategythrough in-context adaptationrather than relying on fixed heuristics or hand-
+engineered prompting. In the partially observable maze, the agent observes only local surroundings
+and must use the cross-episode transcript as its memory. After failing in Episodes 1–2, ORBITenters
+9
+
+--- PAGE 10 ---
+Table 3:Qualitative in-context “reflect and adapt” moment under ORBIT.The agent fails in the
+first two episodes. In the third episode, it explicitly summarizes the failures from earlier interactions,
+reflects on its accumulated history, and selects actions that differ from previous attempts.
+Env
+New episode begins.You are a maze-solving agent. Your goal is to navigate from the START
+position to the GOAL position in the fewest turns possible. You are at the START position (4,1) .
+Around you, up leads to path, down leads to path, left leads to wall, and right leads to wall. Output
+your next move from up/down/left/right within\boxed{}.
+ORBIT
+<think> . . . In Episode 1, I went up three times, then right and down, but got stuck. In Episode 2, I
+went down first and explored the bottom corridor, but that also led to a loop.</think>up
+ORBIT
+<think> . . . Previously, I went up again from here and failed to reach the goal. This time, I will
+explore right instead.</think>right
+[agent moves up, right, right, up, right]
+Env
+Congratulations!You arrived at the goal.
+Table 4:Exploration under failure. ∆States (Ep2|F1) denotes the number of newly explored states
+in Episode 2 conditioned on failure in Episode 1, and ∆States (Ep3|F1–2) denotes the number of
+newly explored states in Episode 3 conditioned on failure in both Episodes 1 and 2. Results are
+collected using Qwen3-8B.
+Method∆States (Ep2|F1)∆States (Ep3|F1–2)
+Base1.64 0.94
+RL4.11 1.27
+ORBIT4.69 1.48
+Episode 3 and spontaneously performs behaviors commonly associated with deliberative exploration:
+itreflectson what went wrong, summarizes the relevant parts of the interaction history, and then
+chooses actions designed to gather new information instead of replaying the same trajectory.
+Crucially, these behaviors are not prescribed by an explicit “reflect” instruction or an auxiliary module:
+they emerge from optimizing the multi-episode meta-RL objective alone. When faced with the same
+local observation, ORBITselects actions that intentionally differ from earlier episodes (Table 3),
+indicating genuinely history-dependent decision making. This shift leads the agent to actively explore
+a previously unvisited route and successfully reach the goal (Fig. 4).
+Beyond the qualitative trace, Table 4 provides quantitative evidence that ORBITchanges its explo-
+ration behaviorconditioned on failure. We measure how manynewstates are visited in later episodes
+given that the agent failed earlier: ∆States (Ep2|F1) counts newly explored states in Episode 2 condi-
+tioned on failure in Episode 1, while ∆States (Ep3|F1–2) counts newly explored states in Episode 3
+conditioned on failure in both Episodes 1 and 2. Under this conditioning, an effective online learner
+should avoid repeating unproductive behaviors and instead actively expand coverage of the state
+space to reduce uncertainty. ORBITconsistently explores more new states than the single-episode
+RL baseline, suggesting that it learns to “try something different” after failure rather than cycling
+through the same local choices.
+Taken together, the qualitative evidence (Table 3, Fig. 4) and the quantitative analysis (Table 4)
+indicate that ORBITlearns an adaptive exploration policy in-context: it can perform reflection-like
+summarization and active exploration strategies on its own, using only the interaction history stored
+10
+
+--- PAGE 11 ---
+Figure 5: In-context learning across episodes on unseen test tasks. Success rate versus episode index
+for Maze (left) and Mastermind (right) when evaluating Qwen3-4B, 8B, 14B trained with ORBIT.
+We report the best-performing checkpoint in terms of success rate of episode 3 within the first 100
+training steps to highlight ORBIT’s potential.
+in the context window, and improves across episodes without any parameter updates at inference
+time.
+4.5 ORBITScales with Model Size
+Figure 5 reveals a consistent benefit from scaling the Qwen3 backbone from 4B to 8B to 14B on
+the unseen Maze and Mastermind benchmarks, with the largest gains appearing in later episodes. In
+particular, Episode 3 improves the most with model size, followed by Episode 2, while Episode 1
+shows only modest improvement (and can even drop for 14B).
+This pattern is consistent with the interpretation that larger ORBITmodels may allocate early
+interaction more toward information gathering (exploration) rather than immediate task completion
+(exploitation), and then capitalize on the accumulated cross-episode evidence in later attempts.
+Overall, scaling model capacity appears to amplify—rather than replace—the multi-episode in-
+context learning dynamics induced by ORBIT.
+5 Discussion and Future Work
+This work primarily demonstrates the feasibility of using meta reinforcement learning as a mechanism
+for inducing generalizable ICRL capabilities, while leaving substantial room for further improvement.
+Importantly, we intentionally keep the framework as simple as possible, avoiding additional compo-
+nents such as external memory, retrieval-augmented generation, or extensive prompt engineering for
+summarization and reflection that have been explored in prior work, in order to isolate and highlight
+the contribution ofmulti-episode meta learningalone. Our experiments are limited to relatively
+short interaction horizons due to the 32k-token context length of the Qwen-3 base model; extending
+training to longer horizons, either with larger-context models or memory-augmented architectures,
+would enable richer temporal reasoning and more effective long-term credit assignment. In addition,
+we train on only five environments, and scaling both the number and diversity of training environ-
+ments is a natural next step toward understanding empirical scaling laws governing generalization.
+There is also significant potential to improve the computational efficiency and stability of the training
+procedure through more advanced optimization and credit-assignment techniques.
+References
+[1] Kwangjun Ahn, Xinyi Cheng, Hadi Daneshmand, and Suvrit Sra. Transformers learn to
+implement preconditioned gradient descent for in-context learning. InAdvances in Neural
+Information Processing Systems (NeurIPS), 2023.
+11
+
+--- PAGE 12 ---
+[2] Tom B. Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared Kaplan, Prafulla Dhariwal,
+Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell, Sandhini Agarwal, Ariel
+Herbert-V oss, Gretchen Krueger, Tom Henighan, Rewon Child, Aditya Ramesh, Daniel M.
+Ziegler, Jeffrey Wu, Clemens Winter, Christopher Hesse, Mark Chen, Eric Sigler, Mateusz
+Litwin, Scott Gray, Benjamin Chess, Jack Clark, Christopher Berner, Sam McCandlish, Alec
+Radford, Ilya Sutskever, and Dario Amodei. Language models are few-shot learners. In
+Advances in Neural Information Processing Systems (NeurIPS), 2020. URL https://arxiv.
+org/abs/2005.14165.
+[3] Lili Chen, Kevin Lu, Aravind Rajeswaran, Kimin Lee, Aditya Grover, Misha Laskin, Pieter
+Abbeel, Aravind Srinivas, and Igor Mordatch. Decision transformer: Reinforcement learning
+via sequence modeling.Advances in neural information processing systems, 34:15084–15097,
+2021.
+[4] Paul F. Christiano, Jan Leike, Tom B. Brown, Miljan Martic, Shane Legg, and Dario Amodei.
+Deep reinforcement learning from human preferences.arXiv preprint arXiv:1706.03741, 2017.
+URLhttps://arxiv.org/abs/1706.03741.
+[5] Nicolò Felicioni, Lucas Maystre, Seth Ghiassian, and Kamil Ciosek. On the importance of
+uncertainty in decision-making with large language models.arXiv preprint arXiv:2404.02649,
+2024. URLhttps://arxiv.org/abs/2404.02649.
+[6] Akshay Krishnamurthy, Keegan Harris, Dylan J. Foster, Cyril Zhang, and Aleksandrs Slivkins.
+Can large language models explore in-context?arXiv preprint arXiv:2403.15371, 2024. URL
+https://arxiv.org/abs/2403.15371.
+[7] Michael Laskin, Luyu Wang, Junhyuk Oh, Emilio Parisotto, Stephen Spencer, Richie Steiger-
+wald, DJ Strouse, Steven Hansen, Angelos Filos, Ethan Brooks, Maxime Gazeau, Himanshu
+Sahni, Satinder Singh, and V olodymyr Mnih. In-context reinforcement learning with algorithm
+distillation. InInternational Conference on Learning Representations (ICLR), 2023. URL
+https://arxiv.org/abs/2210.14215.
+[8] Jonathan N Lee, Annie Xie, Aldo Pacchiano, Yash Chandak, Chelsea Finn, Ofir Nachum, and
+Emma Brunskill. Supervised pretraining can learn in-context reinforcement learning.Neural
+Information Processing Systems, 2023.
+[9] Licong Lin, Yu Bai, and Song Mei. Transformers as decision makers: Provable in-context
+reinforcement learning via supervised pretraining. InThe Twelfth International Conference on
+Learning Representations, 2024. URL https://openreview.net/forum?id=yN4Wv17ss3.
+[10] Giovanni Monea, Antoine Bosselut, Kianté Brantley, and Yoav Artzi. Llms are in-context bandit
+reinforcement learners.arXiv preprint arXiv:2410.05362, 2024.
+[11] Allen Nie, Yi Su, Bo Chang, Jonathan N. Lee, Ed H. Chi, Quoc V . Le, and Minmin Chen.
+EVOLvE: Evaluating and optimizing LLMs for exploration.arXiv preprint arXiv:2410.06238,
+2024. URLhttps://arxiv.org/abs/2410.06238.
+[12] Long Ouyang, Jeff Wu, Xu Jiang, Diogo Almeida, Carroll L. Wainwright, Pamela Mishkin,
+Chong Zhang, Sandhini Agarwal, Katarina Slama, Alex Ray, John Schulman, Jacob Hilton,
+Fraser Kelton, Luke Miller, Maddie Simens, Amanda Askell, Peter Welinder, Paul F. Christiano,
+Jan Leike, and Ryan Lowe. Training language models to follow instructions with human
+feedback.arXiv preprint arXiv:2203.02155, 2022. URL https://arxiv.org/abs/2203.0
+2155.
+[13] Charles Packer, Vivian Fang, Shishir_G Patil, Kevin Lin, Sarah Wooders, and Joseph_E Gonza-
+lez. Memgpt: Towards llms as operating systems. 2023.
+[14] Chanwoo Park, Ziyang Chen, Asuman Ozdaglar, and Kaiqing Zhang. Post-training LLMs as bet-
+ter decision-making agents: A regret-minimization approach.arXiv preprint arXiv:2511.04393,
+2025. URLhttps://arxiv.org/abs/2511.04393.
+[15] Chanwoo Park, Xiangyu Liu, Asuman Ozdaglar, and Kaiqing Zhang. Do llm agents have
+regret? a case study in online learning and games. InInternational Conference on Learning
+Representations, 2025.
+12
+
+--- PAGE 13 ---
+[16] Rafael Rafailov, Archit Sharma, Eric Mitchell, Stefano Ermon, Christopher D. Manning, and
+Chelsea Finn. Direct preference optimization: Your language model is secretly a reward
+model. InAdvances in Neural Information Processing Systems (NeurIPS), 2023. URL https:
+//arxiv.org/abs/2305.18290.
+[17] Nate Rahn, Pierluca D’Oro, and Marc G Bellemare. Controlling large language model agents
+with entropic activation steering.arXiv preprint arXiv:2406.00244, 2024.
+[18] Sharath Chandra Raparthy, Eric Hambro, Robert Kirk, Mikael Henaff, and Roberta Raileanu.
+Generalization to new sequential decision making tasks with in-context learning.arXiv preprint
+arXiv:2312.03801, 2023.
+[19] Zhihong Shao, Peiyi Wang, Qihao Zhu, Runxin Xu, Junxiao Song, Mingchuan Zhang, YK Li,
+Yu Wu, and Daya Guo. Deepseekmath: Pushing the limits of mathematical reasoning in open
+language models.arXiv preprint arXiv:2402.03300, 2024.
+[20] Noah Shinn, Federico Cassano, Ashwin Gopinath, Karthik Narasimhan, and Shunyu Yao.
+Reflexion: Language agents with verbal reinforcement learning.Advances in Neural Information
+Processing Systems, 36, 2024.
+[21] Jiahang Sun, Zhiyong Wang, Runhan Yang, Chenjun Xiao, John Lui, and Zhongxiang Dai.
+Large language model-enhanced multi-armed bandits.arXiv preprint arXiv:2502.01118, 2025.
+[22] Fahim Tajwar, Yiding Jiang, Abitha Thankaraj, Sumaita Sadia Rahman, J. Zico Kolter, Jeff
+Schneider, and Ruslan Salakhutdinov. Training a generally curious agent.arXiv preprint
+arXiv:2502.17543, 2025. URLhttps://arxiv.org/abs/2502.17543.
+[23] Sijun Tan, Michael Luo, Colin Cai, Tarun Venkat, Kyle Montgomery, Aaron Hao, Tianhao
+Wu, Arnav Balyan, Manan Roongta, Chenguang Wang, Li Erran Li, Raluca Ada Popa, and Ion
+Stoica. rllm: A framework for post-training language agents. https://pretty-radio-b75
+.notion.site/rLLM-A-Framework-for-Post-Training-Language-Agents-21b81
+902c146819db63cd98a54ba5f31, 2025. Notion Blog.
+[24] Kimi Team, Angang Du, Bofei Gao, Bowei Xing, Changjiu Jiang, Cheng Chen, Cheng Li,
+Chenjun Xiao, Chenzhuang Du, Chonghua Liao, et al. Kimi k1. 5: Scaling reinforcement
+learning with llms.arXiv preprint arXiv:2501.12599, 2025.
+[25] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez,
+Łukasz Kaiser, and Illia Polosukhin. Attention is all you need.Advances in neural information
+processing systems, 30, 2017.
+[26] Johannes von Oswald, Eyvind Niklasson, Emanuele Randazzo, João Sacramento, Alexander
+Mordvintsev, Andrey Zhmoginov, and Max Vladymyrov. Transformers learn in-context by
+gradient descent. InInternational Conference on Machine Learning (ICML), 2023.
+[27] Minghao Yan, Bo Peng, Benjamin Coleman, Ziqi Chen, Zhouhang Xie, Zhankui He, Noveen
+Sachdeva, Isabella Ye, Weili Wang, Chi Wang, et al. Pacevolve: Enabling long-horizon
+progress-aware consistent evolution.arXiv preprint arXiv:2601.10657, 2026.
+[28] An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu,
+Chang Gao, Chengen Huang, Chenxu Lv, et al. Qwen3 technical report.arXiv preprint
+arXiv:2505.09388, 2025.
+[29] Ziyuan Zhang, Darcy Wang, Ningyuan Chen, Rodrigo Mansur, and Vahid Sarhangian. Compar-
+ing exploration-exploitation strategies of llms and humans: Insights from standard multi-armed
+bandit tasks.arXiv preprint arXiv:2505.09901, 2025.
+13
+
+--- PAGE 14 ---
+A Prompts
+System Prompt
+You are solving the same task across multiple episodes with a fixed total step budget. Each
+episode resets the environment but keeps the task identical. Leverage information gathered
+from earlier episodes to succeed faster. Respond with actions inside \\box{} each turn.
+Prompt for Minesweeper
+You are playing the Minesweeper game. The objective of the game is to reveal all cells that do
+not contain mines. To make a move, you can either reveal a cell or place a flag on a suspected
+mine location using one of the following commands:
+- ’reveal’: Reveal the contents of a specific cell.
+- ’flag’: Place or remove a flag on a specific cell to mark it as a potential mine.
+To submit your move, type the command followed by the row and column in \\box{} .
+For example:
+- \\box{reveal 4 4} to reveal the cell in Row 4, Column 4.
+- \\box{flag 2 2} to place or remove a flag on the cell in Row 2, Column 2.
+The current board layout is shown below. Cells that are unrevealed are represented by a dot
+(’.’), revealed numbers show the count of adjacent mines, and flagged cells are marked with
+an ’F’.
+Use logic and deduction to avoid revealing cells with mines! Be mindful not to choose
+revealed or flagged cells.
+Here is the current board layout:
+0 1 2 3 4
+0 . . . . .
+1 . . . . .
+2 . . . . .
+3 . . . . .
+4 . . . . .
+Enter your guess.
+Prompt for Hangman
+You are playing Hangman. The objective of the game is to guess the 3-letter word by
+providing one letter guesses or the entire word.
+The cells that need to be populated with letters are represented by ’_’.
+There are two ways you can answer. You can provide one letter guesses in the format of
+\\box{TOE}, or you can guess the entire word in the format of \\box{Y}.
+If the given letter is in the word, it will be revealed in the grid.
+If the given word is correct, you win.
+As you play, the history of your choices will be appended below. Use the information to
+figure out the word and win.
+Some rules:
+1. You can only guess one letter/word at a time.
+2. You have to win within 10 turns.
+Here is the current state of the Hangman grid:
+C00 C01 C02
+_ _ _
+Enter your guess.
+14
+
+--- PAGE 15 ---
+Prompt for Blackjack
+You are an agent playing a simplified game of Blackjack against a dealer.
+Game Objective:
+Your goal is to choose actions that maximize your chance of winning against the dealer.
+- The objective is to get a hand value as close to 21 as possible without exceeding 21.
+- If your hand value exceeds 21, you bust and immediately lose.
+- After you stand, the game ends and your hand is compared with the dealer’s hand.
+Card Values:
+- Number cards (2–10): face value
+- Face cards (J, Q, K): value 10
+- Ace (A): value 1 or 11, chosen to give the highest possible hand value not exceeding 21
+Dealer Rules:
+- The dealer has exactly two cards.
+- One dealer card is visible and the other is hidden.
+- The dealer does not draw any additional cards.
+- The dealer’s hand value is computed using the same Ace rule as the player.
+Initial Observation:
+At the start of the episode, you observe:
+1. Dealer’s hand:
+- One visible card and one hidden card
+- Example: Dealer cards: [4, ?]
+2. Your hand:
+- A list of cards currently held
+- Example: Your cards: [10, 6]
+3. Deck:
+- A list of remaining cards indexed by position
+- Unknown card identities are hidden
+- Example: Deck: [0: ?, 1: ?, 2: ?, 3: ?, 4: ?, ...]
+Available Actions:
+At each step, you must choose exactly one of the following actions:
+- Hit: draw a specific card from the deck hit <card_index >
+- Stand: stop drawing cards and end the game stand
+Action Output Format:
+You must output your action in exactly one line, using the following format:
+- Hit example: \\box{hit 9}
+- Stand example: \\box{stand}
+Important constraints:
+- Output only the boxed action.
+- Do not include explanations, reasoning, or additional text.
+- Do not output multiple actions.
+Now Begin:
+Given the current observation, decide your next action and output it in the required format.
+15
+
+--- PAGE 16 ---
+Prompt for RockPaperScissors
+You are playing a multi-turn Rock-Paper-Scissors game against an adversary.
+In each episode, at every turn, the adversary’s action is sampled from a fixed (hidden)
+distribution determined by the seed.
+Your objective is to choose the action that maximizes the probability of winning against this
+hidden distribution each turn.
+Now let’s start the game. Output your action within \\box{...}.
+Prompt for Wordle
+You are playing Wordle.
+You have to guess the secret 5-letter word within 10 turns.
+After you enter your guess, I will say mark your guess as follows:
+- G (green): correct letter in the correct position
+- Y (yellow): letter exists in the word but in the wrong position
+- X (wrong): letter is not in the word
+After thinking, format your final answer inside \\box{...}, for example, CRANE.
+As you play, the history of your guesses will be appended below. Use the information to
+complete the game before you run out of guesses.
+Prompt for Mastermind
+You are playing Mastermind.
+You have to guess the secret 3 digit code within 3 turns.
+The code consists of digits from 1 to 6 (inclusive).
+Duplicate numbers are ’not allowed’.
+After you enter your guess, I will say mark your guess with black and white pegs, where a
+black peg indicates a correct digit in the correct position, while a white peg indicates a correct
+digit in the wrong position.
+After thinking, format your final answer inside \\box{...}, for example, \\box{1 4 6}.
+As you play, the history of your guesses will be appended below. Use the information to
+complete the game before you run out of guesses.
+Enter your first guess to start the game.
+Prompt for Maze
+You are a maze-solving agent. Your goal is to navigate from the START position to the GOAL
+position in the fewest turns possible. You are at the START position. {observation}
+Output your next move from up/down/left/right within \\box{}.
+B Task Rules
+We use seven games for either training or evaluation: Minesweeper, Hangman, Rock–Paper–Scissors,
+Wordle, Blackjack, Mastermind, and Maze. The rules of each game are summarized below.
+B.1 Minesweeper
+Minesweeper is a grid-based puzzle game in which some cells contain hidden mines. Revealing
+a safe cell displays the number of mines in its eight neighboring cells. If a revealed safe cell has
+zero neighboring mines, all adjacent cells are automatically revealed, potentially triggering further
+expansions. The objective is to reveal all non-mine cells without revealing any mine; players may
+place flags to mark suspected mine locations. The game ends either when a mine is revealed (failure)
+or when all safe cells have been successfully uncovered (success).
+16
+
+--- PAGE 17 ---
+B.2 Hangman
+Hangman is a word-guessing game in which a target word is selected and initially concealed, with
+each letter represented by a placeholder. On each turn, the player guesses a single letter. If the
+guessed letter appears in the word, all corresponding positions are revealed; otherwise, the number
+of remaining attempts is reduced by one. The objective is to fully reveal the target word before the
+attempt limit is exhausted.
+ExampleSuppose the hidden word is APPLE. A guess of A reveals A _ _ _ _ . A subsequent
+guess of P reveals A P P _ _ . An incorrect guess, such as Z, does not reveal any letters and
+consumes one attempt. The game continues until the word is fully revealed or the attempt limit is
+reached.
+B.3 Wordle
+Wordle is a word deduction game in which a target word is selected and must be identified within
+a fixed number of attempts. On each turn, the player submits a word guess and receives feedback
+for each letter, indicating whether it is correct and in the correct position, correct but in an incorrect
+position, or absent from the target word. The objective is to deduce the target word before the attempt
+limit is reached.
+ExampleSuppose the hidden word is PLACE. A guess of ALIEN receives feedback indicating that L
+is correct and in the correct positions, A and E are correct but in the wrong position, and I and N are
+absent from the word.
+B.4 Mastermind
+Mastermind is a code-breaking game in which a hidden sequence of numbers is randomly initialized.
+On each turn, the player submits a complete sequence as a guess and receives structured feedback.
+The number of black balls indicates how many numbers are correct and in the correct positions, while
+the number of white balls indicates how many numbers are correct but placed in incorrect positions.
+The objective is to identify the hidden sequence within a fixed maximum number of attempts.
+ExampleSuppose the hidden code is (1, 2, 3). A guess of (1, 3, 4) receives feedback of one black
+ball (since 1 is in the correct position) and a white ball (since 3 is correct but not in the correct
+position).
+B.5 Maze
+Maze is a randomly initialized grid-world environment consisting of a starting position, walls, and a
+goal. Each instance is constructed such that the shortest path from the start to the goal lies within a
+pre-specified length range. At each step, the player observes only the four adjacent grid cells and
+selects an action to move within the maze. The episode is successful if the player reaches the goal
+within a fixed maximum number of steps; otherwise, it is considered a failure.
+B.6 Rock-Paper-Scissors
+Rock–Paper–Scissors is a repeated game in which the player competes against an adversary with a
+fixed stochastic policy. An episode consists of multiple rounds. In each round, both the player and
+the adversary simultaneously choose one of three actions: rock, paper, or scissors. At the end of the
+episode, the player is declared the winner if they win more than half of the rounds; otherwise, the
+episode is considered a failure.
+B.7 Blackjack
+Blackjack is a traditional card game. We consider a simplified setting in which the dealer is dealt two
+cards, one hidden and one revealed. The player also starts with two cards and may repeatedly choose
+whether to draw an additional card from the deck or to stop. Once the player stops drawing, the sum
+of the player’s cards is compared with the dealer’s. The player wins if their sum is greater than the
+17
+
+--- PAGE 18 ---
+0 25 50 75 100
+training step
+0.6
+0.8
+1.0
+1.2
+1.4reward
+Maze
+ORBIT 14B
+ORBIT 8B
+ORBIT 4B
+RL 8B
+0 25 50 75 100
+training step
+1
+2
+3
+4
+Mastermind
+Figure 6: Validation reward versus training step on the unseen Maze (left) and Mastermind (right).
+Curves correspond to ORBIT models of different scales and a single-episode RL baseline.
+dealer’s without exceeding 21; otherwise, the player loses. If the player’s card sum exceeds 21 at any
+point, the episode immediately ends in a loss.
+C Oracle design
+For the maze task, we implement a finite-horizon value-iteration oracle that plans on an incrementally
+constructed belief map aggregated from all previous observations. At each step, the oracle performs
+Bellman backups with memorization over the planning horizon, conditioned on the agent’s current
+position and accumulated observation history. The reward function assigns 100 to wall collisions,
+−0.1 to revisiting known path cells, 100 to reaching the goal, and 1 to entering previously unvisited
+cells. This reward shaping incentivizes exploration for shortest-path discovery.
+For the Mastermind task, we formulate the problem as a finite-horizon dynamic program over belief
+states that compactly encode the entire action–observation history, and obtain the optimal oracle via
+exhaustive enumeration of all possible guesses and feedback outcomes.
+D Validation Reward Curves on Unseen Tasks
+Figure 6 reports validation reward (success count) as a function of training step on the unseen Maze
+and Mastermind tasks.
+E Additional Experimental Details
+All models are trained on a single node with 8 NVIDIA H100 GPUs. For OpenAI model evalu-
+ation, we use gpt-5.2-2025-12-11 with high reasoning effort, and gpt-4o-2024-08-06 with
+temperature0.6and top-p= 0.95.
+18
