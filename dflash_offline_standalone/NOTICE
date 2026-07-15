@@ -1,0 +1,6 @@
+This standalone offline DFlash trainer contains code derived from Tencent
+AngelSlim, Copyright (C) 2025 Tencent, licensed under Apache License 2.0.
+
+The extraction removes AngelSlim runtime dependencies and adds an explicit
+dense-mask attention path, Ascend NPU launch support, aligned checkpoint
+truncation, validation tools, and tests.
